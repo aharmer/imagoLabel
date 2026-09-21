@@ -72,13 +72,20 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     setPhase('running');
+    // Kept outside React state so the failure message below can say how far the export got.
+    let reached = { done: 0, total: 0 };
     try {
       const { folder, images } = useStore.getState();
-      const result = await runExport(target, folder!, images, plan, options, (done, total) => setProgress({ done, total }));
+      const result = await runExport(target, folder!, images, plan, options, (done, total) => {
+        reached = { done, total };
+        setProgress({ done, total });
+      });
       setSummary({ ...result, folder: `${parent.name}/${target.name}` });
       setPhase('done');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      const partial = reached.done > 0 ? ` It stopped after ${reached.done} of ${reached.total} images, so “${target.name}” holds an unfinished dataset — delete it before exporting again.` : '';
+      setError(detail + partial);
       setPhase('options');
     }
   }

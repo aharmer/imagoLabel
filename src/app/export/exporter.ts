@@ -110,17 +110,51 @@ export async function planExport(folder: FolderStore, project: ProjectFile, imag
   return { docs, classes, classIndex, annotations, unlabelled, excluded };
 }
 
-async function writeText(dir: FileSystemDirectoryHandle, name: string, text: string) {
-  const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
-  await writable.write(text);
-  await writable.close();
+/** Give a sync client or a virus scanner a moment to let go of the file before trying again. */
+const ATTEMPTS = 3;
+const RETRY_DELAY_MS = 250;
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Write one file, retrying a couple of times.
+ *
+ * The browser writes to a temporary file beside the target and swaps it in when the stream closes,
+ * and it refuses the swap if anything else touched the file in the meantime. Dropbox, OneDrive and
+ * virus scanners all do exactly that to files that have just appeared, which fails the write with
+ * "the state had changed since it was read from disk". Waiting and writing again usually gets it.
+ */
+async function writeFile(dir: FileSystemDirectoryHandle, name: string, data: Blob | string) {
+  let retried = false;
+  for (let attempt = 1; ; attempt++) {
+    let writable: FileSystemWritableFileStream | undefined;
+    try {
+      writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
+      await writable.write(data);
+      await writable.close();
+      // A write that failed part way leaves the browser's temporary file behind; it is not part of
+      // the dataset, so don't leave it sitting in the export.
+      if (retried) await dir.removeEntry(`${name}.crswap`).catch(() => undefined);
+      return;
+    } catch (err) {
+      retried = true;
+      // A stream that failed to close still holds the temporary file; let it go before retrying.
+      await writable?.abort().catch(() => undefined);
+      const detail = err instanceof Error ? err.message : String(err);
+      if (err instanceof DOMException && err.name === 'NotAllowedError') throw new Error(`imagoLabel is no longer allowed to write to that folder (“${name}”).`);
+      if (attempt >= ATTEMPTS) {
+        throw new Error(
+          `Couldn't write “${name}” after ${ATTEMPTS} tries: ${detail} ` +
+            `This usually means something else on the computer is holding the file — if the folder you exported into is synced by Dropbox or OneDrive, ` +
+            `pause syncing or export somewhere outside the synced folder, then try again.`,
+        );
+      }
+      await wait(RETRY_DELAY_MS * attempt);
+    }
+  }
 }
 
-async function writeBlob(dir: FileSystemDirectoryHandle, name: string, data: Blob) {
-  const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
-  await writable.write(data);
-  await writable.close();
-}
+const writeText = (dir: FileSystemDirectoryHandle, name: string, text: string) => writeFile(dir, name, text);
+const writeBlob = (dir: FileSystemDirectoryHandle, name: string, data: Blob) => writeFile(dir, name, data);
 
 const subdir = (parent: FileSystemDirectoryHandle, ...names: string[]) =>
   names.reduce(async (dir, name) => (await dir).getDirectoryHandle(name, { create: true }), Promise.resolve(parent));
