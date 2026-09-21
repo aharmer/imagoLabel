@@ -87,11 +87,11 @@ class Segmenter {
   }
 
   /** Segment with point and/or box prompts, encoding first if needed. */
-  async segment(key: string, region: Region, picture: () => Promise<ImageBitmap>, points: PromptPoint[], box: Region | null): Promise<SegmentResult> {
+  async segment(key: string, region: Region, picture: () => Promise<ImageBitmap>, points: PromptPoint[], box: Region | null, level: number): Promise<SegmentResult> {
     for (let attempt = 0; ; attempt++) {
       await this.encode(key, region, picture, 'user');
       try {
-        const msg = await this.send('user', { type: 'segment', key, points, box });
+        const msg = await this.send('user', { type: 'segment', key, points, box, level });
         if (msg.type === 'segmented') return msg.result;
         throw new Error('Unexpected response from segmentation worker');
       } catch (err) {

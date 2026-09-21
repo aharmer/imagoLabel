@@ -14,9 +14,10 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
     title: 'Segmenting',
     rows: [
       ['Click', 'Outline the object you clicked'],
-      ['Click on or near it', 'Add a part it missed'],
+      ['↑ / ↓', 'More or less of it, if the outline is bigger or smaller than you meant'],
+      ['Click on or near it', 'Add a part it missed — clicking only ever adds'],
       ['Ctrl+click', 'Add a part further away, without starting a new object'],
-      ['Right-click', 'Remove an area from the outline'],
+      ['Right-click', 'Remove the part you point at'],
       ['Drag', 'Outline whatever is inside the box you drag'],
       ['Backspace', 'Undo your last click'],
       ['Enter', 'Keep the outline'],

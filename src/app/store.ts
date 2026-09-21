@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { PromptPoint, Region } from './segment/protocol';
+import type { PromptPoint, Region, SegmentOption } from './segment/protocol';
 import { FolderStore, LOCK_STALE_MS, rememberFolder, type ImageEntry, type LockFile } from './project/folder';
 import {
   newId,
@@ -24,7 +24,11 @@ export interface PendingSegment {
   region: Region;
   points: PromptPoint[];
   box: BoxShape | null;
+  /** The outline being shown: `options[level]`, or null while the first click is still running. */
   polygon: Array<[number, number]> | null;
+  /** Readings of the same clicks, biggest first, to step between with ↑ and ↓. */
+  options?: SegmentOption[];
+  level: number;
   score?: number;
   busy: boolean;
   error: string | null;

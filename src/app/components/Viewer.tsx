@@ -368,14 +368,17 @@ export function Viewer() {
     store().setPendingSegment({ ...next, busy: true, error: null });
     try {
       const box = next.box && { x: next.box.x, y: next.box.y, width: next.box.width, height: next.box.height };
-      const result = await segmenter.segment(next.key, next.region, () => segmentPicture(img, next.region), next.points, box);
+      const result = await segmenter.segment(next.key, next.region, () => segmentPicture(img, next.region), next.points, box, next.level);
       if (seq !== segmentSeq.current || store().pendingSegment?.key !== next.key) return;
+      const shown = result.options[result.chosen];
       store().setPendingSegment({
         ...next,
-        polygon: result.polygon,
-        score: result.score,
+        options: result.options,
+        level: result.chosen,
+        polygon: shown?.polygon ?? null,
+        score: shown?.score,
         busy: false,
-        error: result.polygon ? null : 'Nothing found there. Try another spot.',
+        error: shown ? null : 'Nothing found there. Try another spot.',
       });
     } catch (err) {
       if (seq !== segmentSeq.current || store().pendingSegment?.key !== next.key) return;
@@ -384,6 +387,7 @@ export function Viewer() {
   }
   const runSegmentRef = useRef(runSegment);
   runSegmentRef.current = runSegment;
+  const stepLevelRef = useRef<(delta: 1 | -1) => boolean>(() => false);
 
   function segmentClick(p: Point, exclude: boolean, add: boolean) {
     if (!image) return;
@@ -402,15 +406,27 @@ export function Viewer() {
     if (exclude) return;
     store().commitPendingSegment();
     const { key, region } = chooseRegion(image, p[0], p[1]);
-    void runSegment({ key, region, points: [point], box: null, polygon: null, busy: true, error: null });
+    void runSegment({ key, region, points: [point], box: null, polygon: null, level: 0, busy: true, error: null });
   }
 
   function segmentBox(box: BoxShape) {
     if (!image) return;
     store().commitPendingSegment();
     const { key, region } = chooseRegion(image, box.x + box.width / 2, box.y + box.height / 2, box);
-    void runSegment({ key, region, points: [], box, polygon: null, busy: true, error: null });
+    void runSegment({ key, region, points: [], box, polygon: null, level: 0, busy: true, error: null });
   }
+
+  /** Show more or less of what the click could have meant, without asking the model again. */
+  function stepLevel(delta: 1 | -1) {
+    const pendingNow = store().pendingSegment;
+    const options = pendingNow?.options;
+    if (!pendingNow || !options?.length) return false;
+    const level = Math.min(options.length - 1, Math.max(0, pendingNow.level + delta));
+    if (level === pendingNow.level) return false;
+    store().setPendingSegment({ ...pendingNow, level, polygon: options[level].polygon, score: options[level].score });
+    return true;
+  }
+  stepLevelRef.current = stepLevel;
 
   // Keys that belong to the viewer. Registered in the capture phase so they win over global shortcuts.
   useEffect(() => {
@@ -426,6 +442,14 @@ export function Viewer() {
         return;
       }
       const pendingNow = useStore.getState().pendingSegment;
+      // ↑ grows the outline to a bigger reading of the same clicks, ↓ shrinks it to a smaller one.
+      if (pendingNow && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        if (stepLevelRef.current(event.key === 'ArrowUp' ? -1 : 1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       if (pendingNow && ['Enter', 'Escape', 'Backspace'].includes(event.key)) {
         if (event.key === 'Enter') useStore.getState().commitPendingSegment();
         else if (event.key === 'Escape') useStore.getState().setPendingSegment(null);
@@ -731,5 +755,6 @@ function segmentHint(status: ModelStatus, pending: PendingSegment | null) {
   if (!pending) return 'Click an object to segment it, or drag a box around it';
   if (pending.busy) return 'Segmenting…';
   if (pending.error) return pending.error;
-  return 'Click this outline to add · right-click to remove · click elsewhere for the next object · Esc to discard';
+  const sizes = pending.options && pending.options.length > 1 ? ` · ↑ ↓ for more or less of it (${pending.level + 1}/${pending.options.length})` : '';
+  return `Click to add · right-click to remove that part${sizes} · Enter to keep · Esc to discard`;
 }
