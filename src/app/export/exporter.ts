@@ -11,6 +11,7 @@ import {
   vocXml,
   yoloLabel,
   SPLITS,
+  SPLIT_DIR,
   type Format,
   type Split,
   type SplitSizes,
@@ -237,10 +238,12 @@ export async function runExport(
     }
   } else if (options.format.startsWith('yolo')) {
     for (const [i, doc] of docs.entries()) {
-      const split = splitOf(doc);
-      await writeText(await subdir(target, 'labels', split), `${baseName(doc.image.name)}.txt`, yoloLabel(doc, classIndex, options.format));
+      // <split>/images and <split>/labels, the layout Roboflow exports. Ultralytics pairs an image
+      // with its label by swapping the last "/images/" in the path for "/labels/", so this works.
+      const split = SPLIT_DIR[splitOf(doc)];
+      await writeText(await subdir(target, split, 'labels'), `${baseName(doc.image.name)}.txt`, yoloLabel(doc, classIndex, options.format));
       filesWritten++;
-      await copyImage(doc, 'images', split);
+      await copyImage(doc, split, 'images');
       onProgress(i + 1, docs.length);
     }
     await writeText(target, 'data.yaml', dataYaml(classes, present));

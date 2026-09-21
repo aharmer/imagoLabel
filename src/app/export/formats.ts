@@ -7,6 +7,16 @@ export type Format = 'yolo-detect' | 'yolo-segment' | 'yolo-classify' | 'coco' |
 export type Split = 'train' | 'val' | 'test';
 export const SPLITS: Split[] = ['train', 'val', 'test'];
 
+/**
+ * What the split folders are called in a detection or segmentation export. data.yaml names them
+ * outright, so these follow the spelling Roboflow uses and people expect to see.
+ *
+ * Classification exports keep "val": they have no yaml, so Ultralytics goes looking for the folder
+ * by name, and only recent versions accept "valid" — an older one would train with no validation
+ * set at all and not say so.
+ */
+export const SPLIT_DIR: Record<Split, string> = { train: 'train', val: 'valid', test: 'test' };
+
 /** Percentages held back from training; the rest is training data. */
 export interface SplitSizes {
   val: number;
@@ -23,8 +33,8 @@ export const FORMAT_LABEL: Record<Format, string> = {
 };
 
 export const FORMAT_NOTE: Record<Format, string> = {
-  'yolo-detect': 'One .txt per image with a box per line, plus data.yaml. Polygons are converted to their bounding box.',
-  'yolo-segment': 'One .txt per image with a polygon per line, plus data.yaml. Boxes are written as four-corner polygons.',
+  'yolo-detect': 'train/valid/test, each holding images and labels, plus data.yaml. One box per line. Polygons are converted to their bounding box.',
+  'yolo-segment': 'train/valid/test, each holding images and labels, plus data.yaml. One polygon per line. Boxes are written as four-corner polygons.',
   'yolo-classify': 'Folders of images per class (train/<class>/image.jpg). Each annotation is cropped out, or whole images are sorted by class.',
   coco: 'A single annotations.json holding boxes and polygons.',
   voc: 'One .xml per image, boxes only. Polygons are converted to their bounding box.',
@@ -70,7 +80,7 @@ export function yoloLabel(doc: ImageDoc, classIndex: Map<string, number>, format
 /** Only detection and segmentation use a data.yaml; classification takes its classes from folder names. */
 export function dataYaml(classes: ClassDef[], present: Set<Split>) {
   const names = classes.map((c, i) => `  ${i}: ${JSON.stringify(c.name)}`).join('\n');
-  const dir = (split: Split) => `images/${split}`;
+  const dir = (split: Split) => `${SPLIT_DIR[split]}/images`;
   const lines = [
     '# Dataset exported by imagoLabel (https://imago-label.vercel.app)',
     `# Created ${new Date().toISOString()}`,
@@ -98,7 +108,8 @@ export function readme(format: Format, hasImages: boolean) {
       '  yolo classify train data=. model=yolo11n-cls.pt epochs=100 imgsz=224',
       '',
       'Each split folder holds one sub-folder per class. Ultralytics takes the class names from the',
-      'folder names, so this layout needs no data.yaml.',
+      'folder names, so this layout needs no data.yaml. The validation folder is "val" rather than',
+      '"valid" because Ultralytics finds it by name, and older versions only recognise "val".',
     );
   } else if (format.startsWith('yolo')) {
     lines.push(
@@ -106,12 +117,19 @@ export function readme(format: Format, hasImages: boolean) {
       '',
       `  yolo ${format === 'yolo-segment' ? 'segment' : 'detect'} train data=data.yaml model=${format === 'yolo-segment' ? 'yolo11n-seg.pt' : 'yolo11n.pt'} epochs=100 imgsz=640`,
       '',
+      'Layout:',
+      '',
+      '  data.yaml',
+      '  train/images/   train/labels/',
+      '  valid/images/   valid/labels/',
+      '  test/images/    test/labels/   (only when a test split was asked for)',
+      '',
       'Label files use normalised coordinates (0-1) and class indices matching the order in data.yaml.',
     );
     if (!hasImages) {
       lines.push(
         '',
-        'This export contains labels only. Copy your images into images/train and images/val',
+        'This export contains labels only. Copy your images into train/images and valid/images',
         'so each image sits beside the label file of the same name.',
       );
     }
