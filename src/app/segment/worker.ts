@@ -1,7 +1,7 @@
 // Runs SAM 2.1 off the main thread. The heavy image encoder runs once per image (on the GPU when
 // possible); each click only runs the small mask decoder, which always runs on the CPU.
 import { AutoModel, AutoProcessor, RawImage, Tensor } from '@huggingface/transformers';
-import { bestMask, keepClickedRegions, simplifyRing, traceOuterContour, upsampleMask } from '../../shared/mask';
+import { bestMask, keepBestRegion, simplifyRing, traceOuterContour, upsampleMask } from '../../shared/mask';
 import { configureOnnxRuntime } from '../../shared/ort';
 import type { Device, FromSegmentWorker, PromptPoint, Region, SegmentResult, ToSegmentWorker } from './protocol';
 
@@ -38,6 +38,20 @@ interface Encoded {
 }
 const encoded = new Map<string, Encoded>();
 
+/**
+ * The object currently being refined: which prompts produced it, and the mask they produced.
+ * A request whose prompts extend (or step back through) these is another click on the same object,
+ * so the mask it chooses should follow on from this one.
+ */
+let current: { key: string; prompts: string[]; grid: Uint8Array } | null = null;
+
+const promptSignature = (points: PromptPoint[], box: Region | null) => [
+  ...(box ? [`box ${box.x},${box.y},${box.width},${box.height}`] : []),
+  ...points.map((p) => `${p.x},${p.y}${p.positive ? '+' : '-'}`),
+];
+
+const isPrefix = (a: string[], b: string[]) => a.every((v, i) => v === b[i]);
+
 async function load(target: Device) {
   const files = new Map<string, { loaded: number; total: number }>();
   let lastPost = 0;
@@ -56,6 +70,7 @@ async function load(target: Device) {
   };
   await model?.dispose?.();
   encoded.clear();
+  current = null;
   processor ??= await AutoProcessor.from_pretrained(MODEL.repo, { progress_callback });
   model = await AutoModel.from_pretrained(MODEL.repo, {
     device: { vision_encoder: target, prompt_encoder_mask_decoder: 'wasm' },
@@ -130,13 +145,28 @@ async function segment(key: string, points: PromptPoint[], box: Region | null): 
   }
   const outputs = await model({ ...entry.embeddings, ...prompt });
 
+  // Clicks in the encoded picture's own pixels, which is what the mask grid is measured against.
+  const local = points.map((p) => {
+    const [x, y] = toLocal(p.x, p.y);
+    return { x, y, positive: p.positive };
+  });
+  const prompts = promptSignature(points, box);
+  const continuing = current?.key === key && (isPrefix(current.prompts, prompts) || isPrefix(prompts, current.prompts));
+
   const ip = processor.image_processor;
-  const m = bestMask(outputs, inputs.reshaped_input_sizes[0], ip.do_pad && ip.pad_size ? ip.pad_size : null);
+  const m = bestMask(outputs, inputs.reshaped_input_sizes[0], ip.do_pad && ip.pad_size ? ip.pad_size : null, {
+    width,
+    height,
+    points: local,
+    previous: continuing ? current!.grid : null,
+  });
+  current = { key, prompts, grid: m.grid };
+
   const mask = upsampleMask(m, width, height);
-  // Trace a single region: the one under the first positive click, or the box centre.
-  const seed = points.find((p) => p.positive);
-  const seedLocal = seed ? toLocal(seed.x, seed.y) : box ? toLocal(box.x + box.width / 2, box.y + box.height / 2) : null;
-  keepClickedRegions(mask, width, height, seedLocal ? [seedLocal] : []);
+  // One region becomes the polygon: the biggest the clicks landed on, or the one round the box.
+  const seeds = local.filter((p) => p.positive).map((p): [number, number] => [p.x, p.y]);
+  if (!seeds.length && box) seeds.push(toLocal(box.x + box.width / 2, box.y + box.height / 2));
+  keepBestRegion(mask, width, height, seeds);
   const ring = simplifyRing(traceOuterContour(mask, width, height), SIMPLIFY_TOLERANCE);
   if (ring.length < 3) return { polygon: null, score: m.score };
 

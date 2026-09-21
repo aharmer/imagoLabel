@@ -47,6 +47,12 @@ const contains = (r: Region, x: number, y: number, w = 0, h = 0) => x >= r.x && 
  * fraction of the outline's longest side. Clicks beyond this start a new object instead.
  */
 const SAME_OBJECT_MARGIN = 0.25;
+/**
+ * The same margin can't be a fraction alone: when the outline so far is only a fragment of the
+ * object, a click on the rest of it lands well outside that fragment. So allow at least this
+ * fraction of the area being segmented, which grows and shrinks with how far the user is zoomed in.
+ */
+const SAME_OBJECT_FLOOR = 0.12;
 
 /** Segment within a cropped region (sharper masks for small objects) once zoomed in past this. */
 const CROP_WHEN_VISIBLE_FRACTION_BELOW = 0.4;
@@ -60,7 +66,7 @@ const DETAIL_DELAY_MS = 250;
 const KEEP_ON_SCREEN_PX = 60;
 
 /** Is this click on, or close to, the outline we're working on? */
-function nearPolygon([x, y]: Point, polygon: Array<[number, number]>) {
+function nearPolygon([x, y]: Point, polygon: Array<[number, number]>, region: Region) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const [px, py] of polygon) {
     if (px < minX) minX = px;
@@ -68,7 +74,10 @@ function nearPolygon([x, y]: Point, polygon: Array<[number, number]>) {
     if (px > maxX) maxX = px;
     if (py > maxY) maxY = py;
   }
-  const margin = Math.max(maxX - minX, maxY - minY) * SAME_OBJECT_MARGIN;
+  const margin = Math.max(
+    Math.max(maxX - minX, maxY - minY) * SAME_OBJECT_MARGIN,
+    Math.max(region.width, region.height) * SAME_OBJECT_FLOOR,
+  );
   return x >= minX - margin && x <= maxX + margin && y >= minY - margin && y <= maxY + margin;
 }
 
@@ -385,7 +394,7 @@ export function Viewer() {
     if (current && samePoint) return;
     // Right-click removes an area from the outline we're working on; Ctrl-click always adds to it.
     // A plain click adds to it too when it lands on or near it, and otherwise starts a new object.
-    const refine = current && (exclude || add || (current.polygon !== null && nearPolygon(p, current.polygon)));
+    const refine = current && (exclude || add || (current.polygon !== null && nearPolygon(p, current.polygon, current.region)));
     if (refine) {
       void runSegment({ ...current, points: [...current.points, point] });
       return;

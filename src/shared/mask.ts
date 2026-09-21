@@ -15,26 +15,112 @@ export interface BestMask {
   cropW: number;
   cropH: number;
   score: number;
+  /** The chosen candidate, thresholded on the mask grid, to compare the next click against. */
+  grid: Uint8Array;
+}
+
+/** What we know about the object being refined: the clicks so far and the mask they produced. */
+export interface Refinement {
+  /** Size of the picture the model was given, which `points` are measured in. */
+  width: number;
+  height: number;
+  points: Array<{ x: number; y: number; positive: boolean }>;
+  /** The mask chosen for this object's previous click, on the mask grid. */
+  previous: Uint8Array | null;
 }
 
 /**
- * Pick the highest-scoring of SAM's candidate masks and describe where the image sits inside the
- * mask grid. SAM 1 pads the resized image to a square; SAM 2/3 stretch it, so pass `pad` = null.
+ * How much of the previous mask a candidate has to keep before we treat it as the same object
+ * rather than a different reading of the clicks.
  */
-export function bestMask(outputs: MaskOutputs, resized: [number, number], pad: { height: number; width: number } | null): BestMask {
+const KEEPS_PREVIOUS = 0.85;
+
+/** Threshold one candidate over the part of the grid the image covers. */
+function gridMask(logits: ArrayLike<number>, offset: number, maskW: number, cropW: number, cropH: number) {
+  const w = Math.ceil(cropW);
+  const h = Math.ceil(cropH);
+  const out = new Uint8Array(w * h);
+  for (let v = 0; v < h; v++) {
+    for (let u = 0; u < w; u++) if (logits[offset + v * maskW + u] > 0) out[v * w + u] = 1;
+  }
+  return out;
+}
+
+/** The fraction of `previous` that `candidate` still covers. 1 when there is nothing to keep. */
+function retained(previous: Uint8Array, candidate: Uint8Array) {
+  let had = 0;
+  let kept = 0;
+  for (let i = 0; i < previous.length; i++) {
+    if (!previous[i]) continue;
+    had++;
+    if (candidate[i]) kept++;
+  }
+  return had ? kept / had : 1;
+}
+
+/**
+ * Pick one of SAM's candidate masks and describe where the image sits inside the mask grid.
+ * SAM 1 pads the resized image to a square; SAM 2/3 stretch it, so pass `pad` = null.
+ *
+ * SAM offers a few readings of the same click — a part, a bigger part, the whole object — and its
+ * own score is only a guess at which one the user meant. Taking the best-scoring one on every
+ * click makes an extra click jump between readings, so the outline collapses to a fragment just as
+ * the user is trying to extend it. While an object is being refined we therefore rank candidates
+ * by whether they agree with every click, then by whether they keep what the last click produced,
+ * and only then by the model's score.
+ */
+export function bestMask(
+  outputs: MaskOutputs,
+  resized: [number, number],
+  pad: { height: number; width: number } | null,
+  refine: Refinement | null = null,
+): BestMask {
   const scores = outputs.iou_scores.data;
+  const logits = outputs.pred_masks.data;
   const [, , count, maskH, maskW] = outputs.pred_masks.dims;
-  let best = 0;
-  for (let i = 1; i < count; i++) if (scores[i] > scores[best]) best = i;
   const [resizedH, resizedW] = resized;
+  const cropW = (maskW * resizedW) / (pad?.width ?? resizedW);
+  const cropH = (maskH * resizedH) / (pad?.height ?? resizedH);
+
+  const grids: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) grids.push(gridMask(logits, i * maskH * maskW, maskW, cropW, cropH));
+
+  let best = 0;
+  if (refine) {
+    // Clicks, in the grid's own coordinates.
+    const cells = refine.points.map((p) => ({
+      u: Math.min(Math.ceil(cropW) - 1, Math.max(0, Math.round(((p.x + 0.5) * cropW) / refine.width - 0.5))),
+      v: Math.min(Math.ceil(cropH) - 1, Math.max(0, Math.round(((p.y + 0.5) * cropH) / refine.height - 0.5))),
+      positive: p.positive,
+    }));
+    const w = Math.ceil(cropW);
+    const rank = (i: number): [number, number, number] => {
+      let agree = 0;
+      for (const cell of cells) if ((grids[i][cell.v * w + cell.u] === 1) === cell.positive) agree++;
+      const keeps = refine.previous && retained(refine.previous, grids[i]) >= KEEPS_PREVIOUS ? 1 : 0;
+      return [agree, keeps, scores[i]];
+    };
+    let bestRank = rank(0);
+    for (let i = 1; i < count; i++) {
+      const r = rank(i);
+      if (r[0] > bestRank[0] || (r[0] === bestRank[0] && (r[1] > bestRank[1] || (r[1] === bestRank[1] && r[2] > bestRank[2])))) {
+        best = i;
+        bestRank = r;
+      }
+    }
+  } else {
+    for (let i = 1; i < count; i++) if (scores[i] > scores[best]) best = i;
+  }
+
   return {
-    logits: outputs.pred_masks.data,
+    logits,
     offset: best * maskH * maskW,
     maskW,
     maskH,
-    cropW: (maskW * resizedW) / (pad?.width ?? resizedW),
-    cropH: (maskH * resizedH) / (pad?.height ?? resizedH),
+    cropW,
+    cropH,
     score: scores[best],
+    grid: grids[best],
   };
 }
 
@@ -72,10 +158,11 @@ export function upsampleMask(m: BestMask, outW: number, outH: number) {
 
 /**
  * SAM masks often include a few stray specks away from the object. They are invisible at a glance
- * but stretch the bounding box, so keep only the region(s) containing a seed point — or, when no
- * seed lands on the mask, the largest region. Modifies `mask` in place.
+ * but stretch the bounding box, and only one region can become a polygon anyway, so keep a single
+ * one: the largest region a click landed on, or simply the largest when no click did. Modifies
+ * `mask` in place.
  */
-export function keepClickedRegions(mask: Uint8Array, width: number, height: number, seeds: Array<[number, number]>) {
+export function keepBestRegion(mask: Uint8Array, width: number, height: number, seeds: Array<[number, number]>) {
   const labels = new Int32Array(mask.length).fill(-1);
   const stack = new Int32Array(mask.length);
   const sizes: number[] = [];
@@ -100,7 +187,7 @@ export function keepClickedRegions(mask: Uint8Array, width: number, height: numb
   }
   if (sizes.length <= 1) return;
 
-  const keep = new Set<number>();
+  const clicked = new Set<number>();
   for (const [sx, sy] of seeds) {
     const cx = Math.min(width - 1, Math.max(0, Math.round(sx)));
     const cy = Math.min(height - 1, Math.max(0, Math.round(sy)));
@@ -114,15 +201,16 @@ export function keepClickedRegions(mask: Uint8Array, width: number, height: numb
           if (x < 0 || y < 0 || x >= width || y >= height) continue;
           const label = labels[y * width + x];
           if (label >= 0) {
-            keep.add(label);
+            clicked.add(label);
             found = true;
           }
         }
       }
     }
   }
-  if (keep.size === 0) keep.add(sizes.indexOf(Math.max(...sizes)));
-  for (let i = 0; i < mask.length; i++) if (mask[i] && !keep.has(labels[i])) mask[i] = 0;
+  let keep = -1;
+  for (const label of clicked.size ? clicked : sizes.keys()) if (keep < 0 || sizes[label] > sizes[keep]) keep = label;
+  for (let i = 0; i < mask.length; i++) if (mask[i] && labels[i] !== keep) mask[i] = 0;
 }
 
 // Clockwise neighbours on screen (y down), starting west.

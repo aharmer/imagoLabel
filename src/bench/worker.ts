@@ -1,7 +1,7 @@
 // Runs one SAM model off the main thread: load → prepare image → encode → decode clicks.
 // The page creates a fresh worker per benchmark so each model starts with clean memory.
 import { AutoModel, AutoProcessor, RawImage, Tensor, env } from '@huggingface/transformers';
-import { bestMask, keepClickedRegions, upsampleMask } from '../shared/mask';
+import { bestMask, keepBestRegion, upsampleMask } from '../shared/mask';
 import { configureOnnxRuntime, onnxEnv } from '../shared/ort';
 import type { BenchResult, Box, FromWorker, MaskData, ModelConfig, Point, ToWorker } from './protocol';
 
@@ -119,7 +119,7 @@ function renderMask(outputs: any, display: { width: number; height: number }, po
   const { width, height } = display;
   const mask = upsampleMask(m, width, height);
   const toDisplay = width / current!.width;
-  keepClickedRegions(mask, width, height, points.filter((p) => p.positive).map((p) => [p.x * toDisplay, p.y * toDisplay]));
+  keepBestRegion(mask, width, height, points.filter((p) => p.positive).map((p) => [p.x * toDisplay, p.y * toDisplay]));
   const rgba = new Uint8ClampedArray(width * height * 4);
   let minX = width, minY = height, maxX = -1, maxY = -1;
   for (let y = 0; y < height; y++) {
